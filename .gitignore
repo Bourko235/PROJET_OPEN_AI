@@ -11,4 +11,6 @@ vectorstore/
 data/
 
 # OS
-.DS_Store
+.DS_Store.venv/
+__pycache__/
+.env
