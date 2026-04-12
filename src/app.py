@@ -1,7 +1,9 @@
 import chainlit as cl
-from chainlit.utils import make_async 
+from chainlit import make_async
 from agent_supervisor import supervisor
 from memory_manager import MemoryManager
+
+memory_manager = MemoryManager()
 
 @cl.on_chat_start
 async def start():
