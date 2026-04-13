@@ -1,63 +1,80 @@
+import logging
+from enum import Enum
+from typing import Tuple
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_core.prompts import PromptTemplate
-from enum import Enum
-from typing import Literal
-from config import CONFIG
+from langchain_core.prompts import ChatPromptTemplate
+from src.config import CONFIG
+
+# Configuration du logger
+logger = logging.getLogger(__name__)
 
 class QueryType(str, Enum):
-    DOCUMENT = "document"      # Requête nécessitant le RAG (documents internes)
-    TOOL = "tool"             # Requête nécessitant un outil externe (météo, calcul, web)
-    CHAT = "chat"             # Conversation générale
+    DOCUMENT = "document"  # RAG : Protocoles, HAS, SFH, Théorie
+    TOOL = "tool"          # AGENTS : Calculs, Web, Météo, Todo, Date
+    CHAT = "chat"          # LLM : Salutations, aide générale
 
 class SemanticRouter:
     """
-    Routeur intelligent qui analyse l'intention de la requête 
-    pour diriger vers le bon module (RAG, Agent ou LLM pur).
+    Routeur sémantique de grade médical.
+    Précision accrue par Few-Shot Prompting pour distinguer Savoir vs Calcul.
     """
     
     def __init__(self):
         self.llm = ChatOpenAI(
             model=CONFIG.MODEL_NAME, 
-            temperature=0,
+            temperature=0, # Crucial pour la stabilité du format JSON
             api_key=CONFIG.OPENAI_API_KEY
         )
         
-        self.prompt = PromptTemplate(
-            template="""Analyse la requête utilisateur et détermine son type.
+        # Structure de message "System/Human" pour une meilleure adhésion aux instructions
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", """Tu es le Dispatcher de 'Hémo-Expert'. Ton rôle est de classer la requête de l'utilisateur.
 
-RÈGLES DE CLASSIFICATION:
-1. DOCUMENT : Si la question concerne des politiques internes, manuels, rapports, procédures, 
-   historique de l'entreprise ou documents spécifiques à l'organisation.
-   Ex: "Quelle est la politique de congés ?", "Selon le manuel..."
+LOGIQUE DE CLASSIFICATION :
+1. 'document' : Recherche dans la base documentaire locale (PDF). Concerne les protocoles officiels, les recommandations SFH/HAS, les mécanismes d'action, les fiches maladies (LAL, LLC, Myélome).
+2. 'tool' : Utilisation d'un outil spécifique. Concerne :
+   - Les calculs (BSA, Clairance, PNN, IMC).
+   - La météo ou la date.
+   - La recherche web (Tavily/DuckDuckGo) pour l'actualité immédiate.
+   - La gestion de la Todo List.
+3. 'chat' : Interactions sociales, explications sur tes capacités ou remerciements.
 
-2. TOOL : Si la question nécessite une action externe, un calcul, données temps réel 
-   (météo, actualités, calculs mathématiques complexes), ou recherche web.
-   Ex: "Quelle est la météo à Paris ?", "Calcule le BSA", "Recherche les dernières news..."
+RÈGLE D'OR : Si la requête contient un calcul ET une question de protocole, choisis 'tool' (l'agent gérera l'enchaînement).
 
-3. CHAT : Si c'est une salutation, question générale, ou conversation sans besoin de données externes.
-   Ex: "Bonjour", "Comment ça va ?", "Explique-moi la définition de..."
-
-Réponds UNIQUEMENT au format JSON:
-{{"type": "document|tool|chat", "confidence": 0.0-1.0, "reasoning": "explication courte"}}
-
-Requête: {query}""",
-            input_variables=["query"]
-        )
+Réponds exclusivement en JSON avec cette structure :
+{{
+    "type": "document|tool|chat",
+    "confidence": 0.0-1.0,
+    "reasoning": "Brève explication"
+}}"""),
+            ("human", "Exemples : \n- 'Bonjour' -> chat\n- 'Calcule le BSA' -> tool\n- 'Traitement LAL senior' -> document\n- 'Météo à Lille' -> tool\n\nRequête à classer : {query}")
+        ])
         
         self.chain = self.prompt | self.llm | JsonOutputParser()
     
-    def route(self, query: str) -> tuple[QueryType, float, str]:
-        """Route la requête et retourne le type, la confiance et le raisonnement"""
+    def route(self, query: str) -> Tuple[QueryType, float, str]:
+        """Analyse et route la requête avec gestion d'erreurs."""
         try:
+            logger.info(f"Routing query: {query[:50]}...")
             result = self.chain.invoke({"query": query})
-            query_type = QueryType(result["type"])
-            confidence = result["confidence"]
-            reasoning = result["reasoning"]
-            return query_type, confidence, reasoning
+            
+            # Extraction sécurisée
+            q_type = result.get("type", "chat")
+            confidence = result.get("confidence", 0.0)
+            reasoning = result.get("reasoning", "No reason provided")
+
+            # Fallback si confiance trop faible
+            if confidence < 0.6:
+                logger.warning(f"Low confidence routing ({confidence}). Defaulting to TOOL.")
+                return QueryType.TOOL, confidence, "Ambiguïté détectée : redirection vers l'Agent pour analyse profonde."
+
+            return QueryType(q_type), confidence, reasoning
+
         except Exception as e:
-            # Fallback sur CHAT en cas d'erreur
-            return QueryType.CHAT, 0.0, f"Erreur de routing: {str(e)}"
+            logger.error(f"Router Error: {str(e)}")
+            # Fallback de secours ultime
+            return QueryType.CHAT, 0.0, f"Erreur de routage : {str(e)}"
 
 # Singleton
 router = SemanticRouter()

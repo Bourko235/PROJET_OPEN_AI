@@ -1,52 +1,84 @@
+import logging
 from langchain_openai import ChatOpenAI
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.memory import ConversationBufferMemory
-from src.config import OPENAI_API_KEY, MODEL_NAME
+from src.config import CONFIG 
 from src.tools import tools 
-from src.query_engine import medical_knowledge_retrieval 
+from src.query_engine import rag_engine
+from langchain.tools import tool
 
-# 1. On combine tous les outils
-all_tools = tools + [medical_knowledge_retrieval]
+# Configuration du logging
+logger = logging.getLogger(__name__)
 
-# 2. On définit le modèle
-llm = ChatOpenAI(model=MODEL_NAME, temperature=0, openai_api_key=OPENAI_API_KEY)
+# --- WRAPPER DE L'OUTIL RAG ---
+@tool
+def medical_knowledge_retrieval(query: str) -> str:
+    """
+    RECHERCHE DOCUMENTAIRE : Utilise cet outil pour consulter les protocoles internes, 
+    les recommandations de la HAS, de la SFH et toute théorie médicale validée.
+    """
+    logger.info(f"Appel RAG avec la requête : {query}")
+    result = rag_engine.query(query)
+    return result["answer"]
 
-# 3. Initialisation de la Mémoire
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-# 4. Le Prompt de l'Agent (CORRIGÉ)
-prompt = ChatPromptTemplate.from_messages([
-    ("system", """Tu es 'Hémo-Expert', un assistant médical de précision spécialisé en onco-hématologie.
-    Tu aides les soignants à naviguer dans les recommandations HAS et à réaliser des calculs cliniques.
+class HemoAgent:
+    """
+    Agent spécialisé 'Hémo-Expert'. 
+    Capacité d'enchaînement d'outils (Calcul -> Recherche -> Rapport).
+    """
     
-    RÈGLES DE COMPORTEMENT :
-    1. DOSAGE : Si l'utilisateur demande un dosage, vérifie d'abord si tu as besoin de calculer la surface corporelle (BSA) ou la clairance.
-    2. RECHERCHE : Utilise 'medical_knowledge_retrieval' pour toute question sur les protocoles, avis de la HAS ou médicaments.
-    3. CITATION : Cite toujours tes sources et reste factuel.
-    4. MÉMOIRE : Utilise l'historique pour éviter de redemander les paramètres du patient (poids, taille, etc.).
-    5. ANALYSE : Si l'utilisateur utilise des abréviations (LAL, VS, myélome, chimio), traduis-les mentalement en termes complets avant d'appeler tes outils.
-    6. PERSÉVÉRANCE : Ne te contente pas d'une seule recherche. Si un outil ne donne rien, essaie avec une question plus large.
-    7. TOLÉRANCE : Ignore les fautes d'orthographe. Concentre-toi sur l'intention clinique.
-    8. CONTEXTE : Tu as accès à l'historique. Si le patient a une LAL, toutes les questions suivantes portent sur la LAL sauf indication contraire."""),
-    
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad"),
-])
+    def __init__(self):
+        # 1. Modèle paramétré via CONFIG
+        self.llm = ChatOpenAI(
+            model=CONFIG.MODEL_NAME, 
+            temperature=CONFIG.TEMPERATURE, 
+            api_key=CONFIG.OPENAI_API_KEY
+        )
 
-# 5. Construction de l'agent
-agent = create_openai_tools_agent(llm, all_tools, prompt)
+        # 2. Agrégation des outils
+        self.all_tools = tools + [medical_knowledge_retrieval]
 
-# 6. L'exécuteur avec intégration de la mémoire
-agent_executor = AgentExecutor(
-    agent=agent, 
-    tools=all_tools, 
-    memory=memory, 
-    verbose=True
-)
+        # 3. Prompt Systémique de Grade Médical
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", """Tu es 'Hémo-Expert', l'assistant d'aide à la décision clinique.
+            
+            DIRECTIVES CRUCIALES :
+            - CALCULS : N'effectue JAMAIS de calcul mental. Utilise les outils de calcul dédiés. 
+            - SOURCE : Si une information provient d'un document, cite toujours [Source: Nom, Page].
+            - CHAÎNAGE : Tu peux utiliser plusieurs outils pour une seule réponse (ex: calculer un BSA puis chercher une dose).
+            - ABSENCE D'INFO : Si un outil ne donne rien, précise-le et propose une alternative (web_search).
+            - UNITÉS : Sois rigoureux sur les unités (m², ml/min, µmol/L)."""),
+            
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])
 
-if __name__ == "__main__":
-    # Test de vérification
-    print("--- Test de fonctionnement ---")
-    agent_executor.invoke({"input": "Le patient pèse 80kg et mesure 1m75. Calcule son BSA."})
+        # 4. Initialisation de l'Agent
+        agent = create_openai_tools_agent(self.llm, self.all_tools, self.prompt)
+        
+        # 5. Exécuteur de l'Agent
+        self.executor = AgentExecutor(
+            agent=agent, 
+            tools=self.all_tools, 
+            verbose=True, 
+            handle_parsing_errors=True,
+            max_iterations=CONFIG.MAX_ITERATIONS
+        )
+
+    def run(self, user_input: str, history: list) -> dict:
+        """
+        Exécute l'agent avec l'historique fourni par le MemoryManager.
+        """
+        try:
+            response = self.executor.invoke({
+                "input": user_input,
+                "chat_history": history
+            })
+            return response
+        except Exception as e:
+            logger.error(f"Erreur AgentExecutor : {str(e)}")
+            return {"output": f"Désolé, une erreur technique est survenue lors de l'exécution : {str(e)}"}
+
+# Instance unique (Singleton)
+hemo_agent = HemoAgent()

@@ -1,123 +1,131 @@
-from langchain.tools import tool
-from langchain_community.tools import DuckDuckGoSearchResults
-from langchain_community.utilities import OpenWeatherMapAPIWrapper
-from typing import Optional
+import os
 import math
-import requests
+import logging
 from datetime import datetime
-from config import CONFIG
+from langchain.tools import tool
+from src.config import CONFIG
 
-# Outil de recherche Web (fallback si RAG échoue)
+# Configuration du logging pour suivre l'utilisation des outils en console
+logger = logging.getLogger(__name__)
+
+# --- RECHERCHE & MÉTÉO ---
+
 @tool
 def web_search(query: str) -> str:
     """
-    Recherche des informations à jour sur internet via DuckDuckGo.
-    À utiliser lorsque l'information n'est pas disponible dans les documents internes 
-    ou pour actualités récentes.
+    Recherche des informations médicales ou actualités à jour sur internet.
+    À utiliser UNIQUEMENT si le RAG (documents internes) ne trouve pas la réponse.
     """
     try:
-        search = DuckDuckGoSearchResults()
-        results = search.run(query)
-        return f"Résultats de recherche web:\n{results}"
+        # Priorité à Tavily si la clé est présente (beaucoup plus précis pour l'IA)
+        if CONFIG.TAVILY_API_KEY:
+            from langchain_community.tools.tavily_search import TavilySearchResults
+            search = TavilySearchResults(api_key=CONFIG.TAVILY_API_KEY, k=5)
+            return search.run(query)
+        else:
+            # Fallback sur DuckDuckGo
+            from langchain_community.tools import DuckDuckGoSearchResults
+            search = DuckDuckGoSearchResults()
+            # On ajoute des mots clés pour filtrer les résultats non-médicaux
+            return search.run(f"{query} medical oncology hematology")
     except Exception as e:
-        return f"Erreur de recherche web: {str(e)}"
+        logger.error(f"Erreur web_search: {e}")
+        return f"Désolé, la recherche en ligne a échoué : {str(e)}"
 
 @tool
 def get_weather(city: str) -> str:
-    """
-    Récupère la météo actuelle pour une ville donnée.
-    Utilise l'API OpenWeatherMap (nécessite OPENWEATHER_API_KEY).
-    """
+    """Récupère la météo actuelle. Utile pour les conseils de santé publique."""
     if not CONFIG.OPENWEATHER_API_KEY:
-        return "Clé API météo non configurée. Veuillez définir OPENWEATHER_API_KEY."
-    
+        return "Clé OpenWeather non configurée."
     try:
-        weather = OpenWeatherMapAPIWrapper(
-            openweathermap_api_key=CONFIG.OPENWEATHER_API_KEY
-        )
-        result = weather.run(city)
-        return result
+        from langchain_community.utilities import OpenWeatherMapAPIWrapper
+        weather = OpenWeatherMapAPIWrapper(openweathermap_api_key=CONFIG.OPENWEATHER_API_KEY)
+        return weather.run(city)
     except Exception as e:
-        return f"Erreur météo: {str(e)}"
+        return f"Erreur météo (Vérifiez si pyowm est installé) : {str(e)}"
+
+# --- CALCULATEURS MÉDICAUX (SÉCURISÉS) ---
 
 @tool
 def calculate_bsa(height_cm: int, weight_kg: float) -> str:
     """
-    Calcule la Surface Corporelle (BSA) formule de Mosteller.
-    Usage: calculate_bsa(height_cm=180, weight_kg=80)
+    CALCULATEUR OBLIGATOIRE pour la Surface Corporelle (BSA).
+    Formule de Mosteller. Ne jamais calculer manuellement.
     """
     if height_cm <= 0 or weight_kg <= 0:
-        return "Erreur: Les valeurs doivent être positives"
+        return "Erreur : Taille et poids doivent être positifs."
     
     bsa = math.sqrt((height_cm * weight_kg) / 3600)
-    return f"Surface Corporelle (BSA): {bsa:.2f} m²\nFormule: √({height_cm} × {weight_kg} / 3600)"
+    formula = r"$$\text{BSA} = \sqrt{\frac{\text{Poids (kg)} \times \text{Taille (cm)}}{3600}}$$"
+    
+    return (
+        f"La Surface Corporelle (BSA) est de **{bsa:.2f} m²**.\n\n"
+        f"**Rendu mathématique :**\n{formula}"
+    )
 
 @tool
-def calculate_creatinine_clearance(age: int, weight_kg: float, 
-                                   creatinine_umol: float, is_female: bool) -> str:
+def calculate_creatinine_clearance(age: int, weight_kg: float, creatinine_umol: float, is_female: bool) -> str:
     """
-    Calcule la clairance de créatinine (Cockcroft-Gault).
-    Usage: calculate_creatinine_clearance(age=65, weight_kg=70, creatinine_umol=100, is_female=True)
+    CALCULATEUR OBLIGATOIRE pour la clairance de la créatinine (Cockcroft-Gault).
+    Indispensable pour l'adaptation des doses de chimiothérapie.
     """
-    if creatinine_umol <= 0:
-        return "Erreur: Créatinine doit être > 0"
+    if creatinine_umol <= 0: return "Erreur : Valeur de créatinine invalide."
     
-    # Facteur de correction féminin
-    k = 0.85 if is_female else 1.0
+    # Constante pour conversion µmol/L
+    factor = 0.814
+    clearance = ((140 - age) * weight_kg) / (factor * creatinine_umol)
     
-    clearance = ((140 - age) * weight_kg * k) / (creatinine_umol * 0.0113)
+    if is_female:
+        clearance *= 0.85
     
-    interpretation = "Normale" if clearance >= 60 else "Insuffisance modérée" if clearance >= 30 else "Insuffisance sévère"
+    status = "Normale (>60)" if clearance >= 60 else "Modérée (30-60)" if clearance >= 30 else "Sévère (<30)"
+    formula = r"$$\text{Cl} = \frac{(140 - \text{âge}) \times \text{Poids} \times k}{0,814 \times \text{Créat}(\mu mol/L)}$$"
     
-    return (f"Clairance créatinine (Cockcroft-Gault): {clearance:.2f} ml/min\n"
-            f"Interprétation: {interpretation}")
+    return (
+        f"Clairance de la créatinine : **{clearance:.1f} ml/min**.\n"
+        f"Interprétation : **{status}**.\n\n"
+        f"**Formule utilisée :**\n{formula}"
+    )
 
-@tool
-def calculator(expression: str) -> str:
-    """
-    Calculateur mathématique sécurisé pour expressions simples.
-    Usage: calculator(expression="(150 * 2.5) / 3")
-    """
-    try:
-        # Liste blanche de caractères autorisés pour sécurité
-        allowed_chars = set('0123456789+-*/.() ')
-        if not all(c in allowed_chars for c in expression):
-            return "Erreur: Caractères non autorisés. Utilisez uniquement: 0-9, +, -, *, /, (, ), ."
-        
-        result = eval(expression, {"__builtins__": {}}, {})
-        return f"Résultat: {result}"
-    except Exception as e:
-        return f"Erreur de calcul: {str(e)}"
+# --- GESTION DES TÂCHES ---
 
 @tool
 def save_to_todo(task: str, priority: str = "normal") -> str:
-    """
-    Sauvegarde une tâche dans une todo list locale (fichier texte).
-    Usage: save_to_todo(task="Relire le rapport", priority="high")
-    """
+    """Sauvegarde une note clinique ou une tâche de suivi dans la todo list."""
     try:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         with open("todo_list.txt", "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] [{priority.upper()}] {task}\n")
-        return f"✅ Tâche ajoutée: '{task}' (Priorité: {priority})"
+        return f"✅ Tâche enregistrée avec succès : {task}"
     except Exception as e:
-        return f"Erreur sauvegarde: {str(e)}"
+        return f"Erreur d'écriture fichier : {str(e)}"
+
+@tool
+def read_todo() -> str:
+    """Lit l'intégralité de la todo list du praticien."""
+    if not os.path.exists("todo_list.txt"):
+        return "Aucune tâche enregistrée pour le moment."
+    try:
+        with open("todo_list.txt", "r", encoding="utf-8") as f:
+            content = f.read()
+        return f"📋 **Liste des rappels :**\n\n{content}" if content else "La liste est vide."
+    except Exception as e:
+        return f"Erreur de lecture : {str(e)}"
+
+# --- UTILITAIRES ---
 
 @tool
 def get_current_date() -> str:
-    """
-    Retourne la date et l'heure actuelles.
-    """
-    now = datetime.now()
-    return f"Date actuelle: {now.strftime('%d/%m/%Y %H:%M')}"
+    """Donne la date et l'heure système."""
+    return f"Nous sommes le {datetime.now().strftime('%d/%m/%Y')} et il est {datetime.now().strftime('%H:%M')}."
 
-# Liste des outils disponibles pour l'agent
-general_tools = [
-    web_search,
-    get_weather,
-    calculator,
-    calculate_bsa,
-    calculate_creatinine_clearance,
-    save_to_todo,
+# Liste des outils pour l'agent
+tools = [
+    web_search, 
+    get_weather, 
+    calculate_bsa, 
+    calculate_creatinine_clearance, 
+    save_to_todo, 
+    read_todo, 
     get_current_date
 ]
