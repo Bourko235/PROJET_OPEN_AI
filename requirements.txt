@@ -1,11 +1,10 @@
-# requirements.txt
-langchain>=0.1.0
-langchain-openai>=0.0.5
-langchain-community>=0.0.13
-langchain-cohere  
-chromadb>=0.4.22
-pypdf>=4.0.0
-chainlit>=1.0.0  
-streamlit>=1.30.0
-python-dotenv>=1.0.0
-duckduckgo-search>=4.0.0
+chainlit>=1.0.0
+langchain>=0.1.20
+langchain-openai>=0.1.7
+langchain-community>=0.0.38
+pypdf
+chromadb
+python-dotenv
+tavily-python
+pylatexenc
+pyowm

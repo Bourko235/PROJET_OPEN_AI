@@ -1,0 +1,14 @@
+services:
+  hemo-expert:
+    build: .
+    container_name: hemo-expert-app
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./vectorstore:/app/vectorstore
+      - ./memory_sessions:/app/memory_sessions
+      - ./todo_list.txt:/app/todo_list.txt
+    restart: always

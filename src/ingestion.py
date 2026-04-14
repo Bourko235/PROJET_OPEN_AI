@@ -8,25 +8,36 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from src.config import CONFIG
+import logging
 
 
-def safe_rmtree(path, retries=5, delay=1):
-    """Suppression robuste compatible Windows (gère les fichiers verrouillés)"""
-    for i in range(retries):
+logger = logging.getLogger(__name__)
+
+def clean_vectorstore_folder(folder_path):
+    """
+    Supprime le contenu du dossier sans supprimer le dossier lui-même.
+    Ceci évite l'erreur 'Device or resource busy' sur les volumes Docker.
+    """
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path, exist_ok=True)
+        return
+
+    logger.info(f"🧹 Vidage sécurisé du contenu de : {folder_path}")
+    for filename in os.listdir(folder_path):
+        file_path = os.path.join(folder_path, filename)
         try:
-            shutil.rmtree(path)
-            return True
-        except PermissionError:
-            print(f"⏳ Tentative {i+1}/{retries} : fichier verrouillé...")
-            gc.collect()
-            time.sleep(delay)
-    raise PermissionError(f"❌ Impossible de supprimer {path} (toujours verrouillé)")
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)  # Supprime fichier ou lien
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path) # Supprime sous-dossier
+        except Exception as e:
+            logger.error(f"Impossible de supprimer {file_path}: {e}")
 
-
-def ingest_documents(data_path: str = None, persist_directory: str = None, clear_existing: bool = True):
-    """
-    Pipeline d'ingestion robuste pour Hémo-Expert.
-    """
+def ingest_documents():
+    persist_directory = "vectorstore"
+    
+    # Correction : On vide le contenu au lieu de supprimer le dossier
+    clean_vectorstore_folder(persist_directory)
 
     data_path = Path(data_path or CONFIG.DATA_PATH)
     persist_directory = Path(persist_directory or CONFIG.VECTORSTORE_PATH)
@@ -34,7 +45,7 @@ def ingest_documents(data_path: str = None, persist_directory: str = None, clear
     # 🔴 1. Nettoyage AVANT toute utilisation de Chroma
     if clear_existing and persist_directory.exists():
         print(f"🧹 Nettoyage de l'ancienne base : {persist_directory}")
-        safe_rmtree(persist_directory)
+        clean_vectorstore(persist_directory)
 
     # 🔴 Libération mémoire préventive (important sous Windows)
     gc.collect()
@@ -110,7 +121,8 @@ def ingest_documents(data_path: str = None, persist_directory: str = None, clear
     # 🔒 5. Libération propre (CRUCIAL pour éviter le bug au prochain run)
     vectorstore = None
     gc.collect()
-
+    
+logger.info("📥 Indexation des nouveaux documents en cours...")
 
 if __name__ == "__main__":
     ingest_documents()
