@@ -1,6 +1,9 @@
 import logging
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+try:
+    from langchain_openai import create_openai_tools_agent
+except ImportError:
+    from langchain.agents import create_openai_tools_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from src.config import CONFIG 
 from src.tools import tools 

@@ -10,7 +10,6 @@ from langchain_community.vectorstores import Chroma
 from src.config import CONFIG
 import logging
 
-
 logger = logging.getLogger(__name__)
 
 def clean_vectorstore_folder(folder_path):
@@ -27,27 +26,27 @@ def clean_vectorstore_folder(folder_path):
         file_path = os.path.join(folder_path, filename)
         try:
             if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)  # Supprime fichier ou lien
+                os.unlink(file_path)
             elif os.path.isdir(file_path):
-                shutil.rmtree(file_path) # Supprime sous-dossier
+                shutil.rmtree(file_path)
         except Exception as e:
             logger.error(f"Impossible de supprimer {file_path}: {e}")
 
-def ingest_documents():
-    persist_directory = "vectorstore"
-    
-    # Correction : On vide le contenu au lieu de supprimer le dossier
-    clean_vectorstore_folder(persist_directory)
-
+def ingest_documents(data_path=None, persist_directory=None, clear_existing=True):
+    """
+    Pipeline d'ingestion avec nettoyage sécurisé pour Docker.
+    """
+    # Définition des chemins avec fallback sur CONFIG
     data_path = Path(data_path or CONFIG.DATA_PATH)
     persist_directory = Path(persist_directory or CONFIG.VECTORSTORE_PATH)
+    
+    logger.info("📥 Indexation des nouveaux documents en cours...")
 
     # 🔴 1. Nettoyage AVANT toute utilisation de Chroma
-    if clear_existing and persist_directory.exists():
-        print(f"🧹 Nettoyage de l'ancienne base : {persist_directory}")
-        clean_vectorstore(persist_directory)
+    if clear_existing:
+        clean_vectorstore_folder(str(persist_directory))
 
-    # 🔴 Libération mémoire préventive (important sous Windows)
+    # 🔴 Libération mémoire préventive
     gc.collect()
 
     if not data_path.exists():
@@ -59,27 +58,30 @@ def ingest_documents():
     documents = []
 
     # 📄 PDF
-    pdf_loader = DirectoryLoader(
-        str(data_path),
-        glob="**/*.pdf",
-        loader_cls=PyPDFLoader,
-        show_progress=True
-    )
-    documents.extend(pdf_loader.load())
+    try:
+        pdf_loader = DirectoryLoader(
+            str(data_path),
+            glob="**/*.pdf",
+            loader_cls=PyPDFLoader,
+            show_progress=True
+        )
+        documents.extend(pdf_loader.load())
+    except Exception as e:
+        logger.warning(f"Erreur chargement PDF: {e}")
 
     # 📄 TXT / MD
     for ext in ["*.txt", "*.md"]:
-        text_loader = DirectoryLoader(
-            str(data_path),
-            glob=f"**/{ext}",
-            loader_cls=TextLoader,
-            loader_kwargs={'encoding': 'utf-8'},
-            show_progress=True
-        )
         try:
+            text_loader = DirectoryLoader(
+                str(data_path),
+                glob=f"**/{ext}",
+                loader_cls=TextLoader,
+                loader_kwargs={'encoding': 'utf-8'},
+                show_progress=True
+            )
             documents.extend(text_loader.load())
         except Exception as e:
-            print(f"⚠️ Erreur sur {ext}: {e}")
+            logger.warning(f"Erreur chargement {ext}: {e}")
 
     if not documents:
         print("⚠️ Aucun document trouvé. Ingestion annulée.")
@@ -98,31 +100,38 @@ def ingest_documents():
     chunks = text_splitter.split_documents(documents)
     print(f"✂️ {len(chunks)} fragments (chunks) créés.")
 
-    # 🧠 3. Embeddings
+    # 🧠 3. Embeddings avec batching pour éviter l'erreur 400 tokens
     embeddings = OpenAIEmbeddings(
         model=CONFIG.EMBEDDING_MODEL,
         openai_api_key=CONFIG.OPENAI_API_KEY,
-        chunk_size=250
+        chunk_size=100  # Limite le nombre de docs par appel API
     )
 
-    # 📦 4. Vector store
+    # 📦 4. Vector store avec batching manuel
     print("🧠 Indexation dans ChromaDB...")
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
+    
+    # Création incrémentale pour éviter les limites tokens
+    vectorstore = Chroma(
         persist_directory=str(persist_directory),
-        collection_metadata={"hnsw:space": "cosine"}
+        embedding_function=embeddings
     )
+    
+    # Batching manuel
+    batch_size = 50
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i+batch_size]
+        vectorstore.add_documents(batch)
+        if (i // batch_size) % 10 == 0:
+            print(f"   Progression: {min(i+batch_size, len(chunks))}/{len(chunks)}")
 
     print(f"--- ✅ Indexation réussie ---")
     print(f"📍 Dossier : {persist_directory}")
     print(f"🔢 Total fragments indexés : {vectorstore._collection.count()}")
 
-    # 🔒 5. Libération propre (CRUCIAL pour éviter le bug au prochain run)
+    # 🔒 5. Libération propre
+    vectorstore.persist()
     vectorstore = None
     gc.collect()
-    
-logger.info("📥 Indexation des nouveaux documents en cours...")
 
 if __name__ == "__main__":
     ingest_documents()

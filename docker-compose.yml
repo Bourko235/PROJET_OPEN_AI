@@ -1,14 +1,61 @@
+version: '3.8'
+
 services:
+  # Service principal - Interface Web (Chainlit)
   hemo-expert:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     container_name: hemo-expert-app
     ports:
-      - "8002:8002"
+      - "8002:8002"  # Host:Container (l'app écoute sur 8000 dans le container)
     env_file:
       - .env
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - CHAINLIT_SERVER_HOST=0.0.0.0
     volumes:
-      - ./data:/app/data
-      - ./vectorstore:/app/vectorstore
-      - ./memory_sessions:/app/memory_sessions
-      - ./todo_list.txt:/app/todo_list.txt
-    restart: always
+      - ./data:/app/data:ro                    # Read-only (sécurité)
+      - ./vectorstore:/app/vectorstore         # Persistance ChromaDB
+      - ./memory_sessions:/app/memory_sessions # Persistance mémoire
+      - ./logs:/app/logs                       # Logs persistants
+      # Ne PAS monter todo_list.txt directement (créé dynamiquement)
+    restart: unless-stopped  # ✅ Mieux que 'always' (peut être arrêté manuellement)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - hemo-network
+
+  # Service optionnel - Ingestion (one-shot)
+  # Utilisation : docker-compose run --rm ingestion
+  ingestion:
+    build: .
+    container_name: hemo-expert-ingest
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./data:/app/data:ro
+      - ./vectorstore:/app/vectorstore  # Écriture autorisée
+    command: >
+      sh -c "echo 'Attente ChromaDB...' && 
+             python -c 'from src.ingestion import ingest_documents; ingest_documents()' && 
+             echo '✅ Ingestion terminée'"
+    profiles: ["ingest"]  # Ne démarre pas avec 'docker-compose up'
+    networks:
+      - hemo-network
+
+networks:
+  hemo-network:
+    driver: bridge
+
+volumes:
+  vectorstore:
+  memory_sessions:
+  logs:
